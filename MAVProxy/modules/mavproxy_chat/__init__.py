@@ -17,8 +17,8 @@ from MAVProxy.modules.mavproxy_chat import chat_window
 from pymavlink import mavutil
 from threading import Thread
 import time
-
-
+import subprocess
+import os
 class chat(mp_module.MPModule):
     def __init__(self, mpstate):
 
@@ -39,6 +39,14 @@ class chat(mp_module.MPModule):
         # run chat window in a separate thread
         self.thread = Thread(target=self.create_chat_window)
         self.thread.start()
+        # Start screenshot capture script
+        # Determine the directory of the current script (__init__.py)
+        dir_path = os.path.dirname(os.path.realpath(__file__))
+        screenshot_script_path = os.path.join(dir_path, 'screenshot_capture.py')
+        # Start screenshot capture script using the absolute path
+        self.screenshot_process = subprocess.Popen(['python', screenshot_script_path])
+        print("Screenshot capture script started.")
+
 
     # create chat window (should be called from a new thread)
     def create_chat_window(self):
