@@ -14,54 +14,29 @@ import time
 import re
 from datetime import datetime
 from threading import Thread, Lock
-from typing_extensions import override
+import threading
 import json
 import math
 from MAVProxy.modules.lib import param_help
+import os
+import base64
+import requests
+from PIL import Image
 
 try:
-    from openai import OpenAI, AssistantEventHandler
+    from openai import OpenAI
 except Exception:
     print("chat: failed to import openai. See https://ardupilot.org/mavproxy/docs/modules/chat.html")
     exit()
 
 
-class EventHandler(AssistantEventHandler):
-    def __init__(self, chat_openai):
-        # record reference to chat_openai object
-        self.chat_openai = chat_openai
-
-        # initialise parent class (assistant event handler)
-        super().__init__()
-
-    @override
-    def on_event(self, event):
-        # record run id so that it can be cancelled if required
-        self.chat_openai.latest_run_id = event.data.id
-
-        # display the event in the status field
-        event_string_array = event.event.split(".")
-        event_string = event_string_array[-1]
-        self.chat_openai.send_status(event_string)
-
-        # requires_action events handled by function calls
-        if event.event == 'thread.run.requires_action':
-            self.chat_openai.handle_function_call(event)
-
-        # display reply text in the reply window
-        if (event.event == "thread.message.delta"):
-            stream_text = event.data.delta.content[0].text.value
-            self.chat_openai.send_reply(stream_text)
-
-
 class chat_openai():
-    def __init__(self, mpstate, status_cb=None, reply_cb=None, wait_for_command_ack_fn=None):
+    def __init__(self, mpstate, status_cb=None, wait_for_command_ack_fn=None):
         # keep reference to mpstate
         self.mpstate = mpstate
 
         # keep reference to status callback
         self.status_cb = status_cb
-        self.reply_cb = reply_cb
 
         # keep reference to wait_for_command_ack_fn
         self.wait_for_command_ack_fn = wait_for_command_ack_fn
@@ -78,7 +53,6 @@ class chat_openai():
         self.client = None
         self.assistant = None
         self.assistant_thread = None
-        self.latest_run_id = None
 
     # check connection to OpenAI assistant and connect if necessary
     # returns True if connection is good, False if not
@@ -86,13 +60,16 @@ class chat_openai():
         # create connection object
         if self.client is None:
             try:
+            	#print("Attempting to create OpenAI client...")
                 self.client = OpenAI()
-            except Exception:
+            except Exception as e:
+                print("Failed to connect to OpenAI:", str(e))
                 print("chat: failed to connect to OpenAI")
                 return False
 
         # check connection again just to be sure
         if self.client is None:
+            print("Client is still None after attempt to connect.")
             print("chat: failed to connect to OpenAI")
             return False
 
@@ -112,7 +89,7 @@ class chat_openai():
 
             # raise error if assistant not found
             if self.assistant is None:
-                print("chat: failed to connect to OpenAI assistant")
+                print("chat: failed to connect to OpenAI assistant1")
                 return False
 
         # create new thread
@@ -126,79 +103,75 @@ class chat_openai():
 
     # set the OpenAI API key
     def set_api_key(self, api_key_str):
+        print("Setting API Key:", api_key_str)  # Print the API key being set
+        self.api_key = api_key_str  # Store the API key in the instance
         self.client = OpenAI(api_key=api_key_str)
         self.assistant = None
         self.assistant_thread = None
+        
 
-    # cancel the active run
-    def cancel_run(self):
-        # check the active thread and run id
-        if self.assistant_thread and self.latest_run_id is not None:
-            # cancel the run
-            self.client.beta.threads.runs.cancel(
-                thread_id=self.assistant_thread.id,
-                run_id=self.latest_run_id
-            )
-        else:
-            self.send_status("No active run to cancel")
 
+##    def upload_image(self, image_path):
+##        headers = {
+##            "Authorization": f"Bearer {self.api_key}"
+##        }
+##
+##        with open(image_path, "rb") as image_file:
+##            files = {
+##                'file': (image_path, image_file, 'application/octet-stream')
+##            }
+##            data = {
+##                'purpose': 'vision' 
+##            }
+##            response = requests.post("https://api.openai.com/v1/files", headers=headers, files=files, data=data)
+##          
+##
+##            
+##            response_data = response.json()
+##            print(response_data['id'])
+##            print(response_data['object'])
+##            print(response_data['filename'])
+##            print(response_data['purpose'])
+##
+##        if 'error' in response_data:
+##            print(f"Error uploading image: {response_data['error']['message']}")
+##            return None
+##
+##        return response_data['id']
+
+##    def send_to_assistant(self, text, attachment=None):
+##        # get lock
+##        with self.send_lock:
+##                    # Check for empty text
+##            if not text.strip():  # Check if the text is only whitespace or empty
+##                print("No text to send to the assistant.")
+##                return "chat: No input received to send to the assistant."
     # send text to assistant
-    def send_to_assistant(self, text):
-        # get lock
-        with self.send_lock:
+    # send text to assistant
 
-            # check connection
-            if not self.check_connection():
-                self.send_reply("chat: failed to connect to OpenAI")
-                return
 
-            # create a new message
-            input_message = self.client.beta.threads.messages.create(
-                thread_id=self.assistant_thread.id,
-                role="user",
-                content=text
-            )
-            if input_message is None:
-                self.send_reply("chat: failed to create input message")
-                return
 
-            # create event handler
-            event_handler = EventHandler(self)
 
-            # create a run
-            with self.client.beta.threads.runs.stream(
-                thread_id=self.assistant_thread.id,
-                assistant_id=self.assistant.id,
-                event_handler=event_handler
-            ) as stream:
-                stream.until_done()
 
-            # retrieve the run and print its final status
-            if self.assistant_thread and self.latest_run_id:
-                run = self.client.beta.threads.runs.retrieve(
-                    thread_id=self.assistant_thread.id,
-                    run_id=self.latest_run_id
-                )
-                if run is not None:
-                    self.send_status(run.status)
-            else:
-                self.send_status("done")
+
+
 
     # handle function call request from assistant
-    def handle_function_call(self, event):
+    # on success this returns the text response that should be sent to the assistant, returns None on failure
+    def handle_function_call(self, run):
 
         # sanity check required action (this should never happen)
-        if (event.event != "thread.run.requires_action"):
+        if run.required_action is None:
             print("chat::handle_function_call: assistant function call empty")
-            return
+            return None
 
         # check format
-        if event.data.required_action.submit_tool_outputs is None:
+        if run.required_action.submit_tool_outputs is None:
             print("chat::handle_function_call: submit tools outputs empty")
-            return
+            return None
 
         tool_outputs = []
-        for tool_call in event.data.required_action.submit_tool_outputs.tool_calls:
+        for tool_call in run.required_action.submit_tool_outputs.tool_calls:
             # init output to None
             output = "invalid function call"
 
@@ -253,26 +226,13 @@ class chat_openai():
 
         # send function replies to assistant
         try:
-            stream = self.client.beta.threads.runs.submit_tool_outputs(
-                thread_id=event.data.thread_id,
-                run_id=event.data.id,
-                tool_outputs=tool_outputs,
-                stream=True)
-
-            for event in stream:
-                # requires_action events handled by function calls
-                if event.event == 'thread.run.requires_action':
-                    self.handle_function_call(event)
-
-                # display reply text in the reply window
-                if (event.event == "thread.message.delta"):
-                    stream_text = event.data.delta.content[0].text.value
-                    self.send_reply(stream_text)
-
+            self.client.beta.threads.runs.submit_tool_outputs(
+                thread_id=run.thread_id,
+                run_id=run.id,
+                tool_outputs=tool_outputs)
         except Exception:
             print("chat: error replying to function call")
             print(tool_outputs)
-            return
 
     # get the current date and time in the format, Saturday, June 24, 2023 6:14:14 PM
     def get_current_datetime(self, arguments):
@@ -792,10 +752,6 @@ class chat_openai():
         if self.status_cb is not None:
             self.status_cb(status)
 
-    def send_reply(self, reply):
-        if self.reply_cb is not None:
-            self.reply_cb(reply)
-
     # returns true if string contains regex characters
     def contains_regex(self, string):
         regex_characters = ".^$*+?{}[]\\|()"
@@ -803,3 +759,158 @@ class chat_openai():
             if string.count(x):
                 return True
         return False
+
+    def send_to_assistant(self, text, file_id=None):
+        # get lock
+        print("the file id in the send to assistant function is")
+        print(file_id)
+        #cleaned_file_id = file_id.replace("file-", "")
+
+        with self.send_lock:
+                    # Check for empty text
+            if not text.strip():  # Check if the text is only whitespace or empty
+                print("No text to send to the assistant.")
+                return "chat: No input received to send to the assistant."
+               
+
+            # check connection
+            if not self.check_connection():
+                print("Connection check failed before sending message.")
+                return "chat: failed to connect to OpenAI"
+
+            # create a new message
+            if file_id==None:
+                input_message = self.client.beta.threads.messages.create(
+                thread_id=self.assistant_thread.id,
+                role="user",
+                content=text
+            )
+
+            else:
+                input_message = self.client.beta.threads.messages.create(
+                thread_id=self.assistant_thread.id,
+                role="user",
+                content=[
+                    {"type": "text", "text": "describe the image"},
+                    {
+                        "type": "image_file",
+                        "image_file": {
+                        "file_id": file_id
+                        }
+                    }       
+                ]
+        )   
+            if input_message is None:
+                return "chat: failed to create input message"
+
+            # create a run
+            self.run = self.client.beta.threads.runs.create(
+                thread_id=self.assistant_thread.id,
+                assistant_id=self.assistant.id
+            )
+            if self.run is None:
+                return "chat: failed to create run"
+
+            # wait for run to complete
+            run_done = False
+            while not run_done:
+                # wait for one second
+                time.sleep(0.1)
+
+                # retrieve the run
+                latest_run = self.client.beta.threads.runs.retrieve(
+                    thread_id=self.assistant_thread.id,
+                    run_id=self.run.id
+                )
+
+                # init failure message
+                failure_message = None
+
+                # check run status
+                if latest_run.status in ["queued", "in_progress", "cancelling"]:
+                    run_done = False
+                elif latest_run.status in ["cancelled", "completed", "expired"]:
+                    run_done = True
+                elif latest_run.status in ["failed"]:
+                    failure_message = latest_run.last_error.message
+                    run_done = True
+                elif latest_run.status in ["requires_action"]:
+                    self.handle_function_call(latest_run)
+                    run_done = False
+                else:
+                    print("chat: unrecognised run status" + latest_run.status)
+                    run_done = True
+
+                # send status to status callback
+                status_message = latest_run.status
+                if failure_message is not None:
+                    status_message = status_message + ": " + failure_message
+                self.send_status(status_message)
+
+            # retrieve messages on the thread
+            reply_messages = self.client.beta.threads.messages.list(self.assistant_thread.id,
+                                                                    order="asc",
+                                                                    after=input_message.id)
+            if reply_messages is None:
+                return "chat: failed to retrieve messages"
+
+            # concatenate all messages into a single reply skipping the first which is our question
+            reply = ""
+            need_newline = False
+            for message in reply_messages.data:
+                reply = reply + message.content[0].text.value
+                if need_newline:
+                    reply = reply + "\n"
+                need_newline = True
+
+            if reply is None or reply == "":
+                return "chat: failed to retrieve latest reply"
+            return reply
+
+
+    
+
+    def upload_image(self, image_path):
+        headers = {
+            "Authorization": f"Bearer {self.api_key}"
+        }
+
+        with open(image_path, "rb") as image_file:
+            files = {
+                'file': (image_path, image_file, 'application/octet-stream')
+            }
+            data = {
+                'purpose': 'vision'  # 
+            }
+            response = requests.post("https://api.openai.com/v1/files", headers=headers, files=files, data=data)        
+            
+            response_data = response.json()
+            print(response_data['id'])
+            print(response_data['object'])
+            print(response_data['filename'])
+            print(response_data['purpose'])
+        if 'error' in response_data:
+            print(f"Error uploading image: {response_data['error']['message']}")
+            return None
+
+        return response_data['id']
+    def periodic_image_send(self):
+         # Define the directory and filename
+        print("periodic_image_send called")
+        directory = "./mavproxy_screenshots"
+        filename = "map_screenshot.jpeg"
+        image_path = os.path.join(directory, filename)  # This matches the path used in capture_screenshot
+        file_id=self.upload_image(image_path)
+        #upload the image
+        print(file_id)
+        print(type(file_id))
+
+        text="image"
+        self.send_to_assistant(text, file_id)
+
+            # Getting the base64 string
+            #self.send_to_assistant(text)
+
+
+         
+            
